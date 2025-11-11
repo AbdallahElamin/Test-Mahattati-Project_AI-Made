@@ -1,0 +1,44 @@
+.sponsored-ads {
+  margin-bottom: 20px;
+}
+
+.sponsored-ads-top {
+  width: 100%;
+  max-height: 200px;
+  overflow: hidden;
+}
+
+.sponsored-ads-left {
+  width: 100%;
+}
+
+.sponsored-ad-item {
+  margin-bottom: 15px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.sponsored-ad-item img,
+.sponsored-ad-item video {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.sponsored-ad-item a {
+  display: block;
+  text-decoration: none;
+}
+
+.sponsored-ads-top .sponsored-ad-item {
+  max-height: 200px;
+}
+
+.sponsored-ads-top .sponsored-ad-item img,
+.sponsored-ads-top .sponsored-ad-item video {
+  object-fit: cover;
+  height: 200px;
+}
+
+

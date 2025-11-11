@@ -1,0 +1,33 @@
+.map-container-wrapper {
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.map {
+  width: 100%;
+  height: 600px;
+}
+
+.map-info-window {
+  padding: 10px;
+  max-width: 300px;
+}
+
+.map-info-window h3 {
+  margin-bottom: 10px;
+  color: var(--primary-color);
+}
+
+.map-info-window p {
+  margin: 5px 0;
+  font-size: 14px;
+}
+
+@media (max-width: 768px) {
+  .map {
+    height: 400px;
+  }
+}
+
+
