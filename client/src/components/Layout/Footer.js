@@ -11,7 +11,7 @@ const Footer = () => {
       <div className="container">
         <div className="footer-content">
           <div className="footer-section">
-            <h3>محطاتي | Mahattati</h3>
+            <h3>محطتي | Mahattati</h3>
             <p>منصة إعلانات محطات الوقود في المملكة العربية السعودية</p>
             <p>Fuel Station Advertising Platform in Saudi Arabia</p>
           </div>

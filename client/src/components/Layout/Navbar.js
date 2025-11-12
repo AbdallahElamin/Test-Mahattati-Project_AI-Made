@@ -25,7 +25,7 @@ const Navbar = () => {
       <div className="container">
         <div className="navbar-content">
           <Link to="/" className="navbar-brand">
-            <h1>محطاتي | Mahattati</h1>
+            <h1>محطتي | Mahattati</h1>
           </Link>
 
           <div className="navbar-menu">

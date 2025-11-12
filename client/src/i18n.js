@@ -5,7 +5,7 @@ import LanguageDetector from 'i18next-browser-languagedetector';
 const resources = {
   ar: {
     translation: {
-      welcome: 'مرحباً بك في محطاتي',
+      welcome: 'مرحباً بك في محطتي',
       login: 'تسجيل الدخول',
       register: 'إنشاء حساب',
       email: 'البريد الإلكتروني',
