@@ -3,7 +3,7 @@ const multer = require('multer');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -37,12 +37,17 @@ const upload = multer({
 // @access  Private
 router.get('/profile', authenticate, async (req, res) => {
   try {
-    const [users] = await pool.execute(
-      'SELECT id, name, email, role, phone, company_name, profile_image, language_preference FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, role, phone, company_name, profile_image, language_preference')
+      .eq('id', req.user.id)
+      .single();
 
-    res.json({ user: users[0] });
+    if (error || !user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({ user });
   } catch (error) {
     console.error('Get profile error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -64,38 +69,35 @@ router.put('/profile', authenticate, upload.single('profile_image'), [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const updateFields = [];
-    const updateValues = [];
+    const updateData = {};
 
     const allowedFields = ['name', 'phone', 'company_name', 'language_preference'];
     allowedFields.forEach(field => {
       if (req.body[field] !== undefined) {
-        updateFields.push(`${field} = ?`);
-        updateValues.push(req.body[field]);
+        updateData[field] = req.body[field];
       }
     });
 
     if (req.file) {
-      updateFields.push('profile_image = ?');
-      updateValues.push(`/uploads/profiles/${req.file.filename}`);
+      updateData.profile_image = `/uploads/profiles/${req.file.filename}`;
     }
 
-    if (updateFields.length === 0) {
+    if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ message: 'No fields to update' });
     }
 
-    updateValues.push(req.user.id);
-    await pool.execute(
-      `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`,
-      updateValues
-    );
+    const { data: user, error } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', req.user.id)
+      .select('id, name, email, role, phone, company_name, profile_image, language_preference')
+      .single();
 
-    const [user] = await pool.execute(
-      'SELECT id, name, email, role, phone, company_name, profile_image, language_preference FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    if (error || !user) {
+      return res.status(500).json({ message: 'Server error updating profile' });
+    }
 
-    res.json({ user: user[0] });
+    res.json({ user });
   } catch (error) {
     console.error('Update profile error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -118,8 +120,17 @@ router.put('/change-password', authenticate, [
     const { current_password, new_password } = req.body;
 
     // Get current password
-    const [users] = await pool.execute('SELECT password FROM users WHERE id = ?', [req.user.id]);
-    const isMatch = await bcrypt.compare(current_password, users[0].password);
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('password')
+      .eq('id', req.user.id)
+      .single();
+
+    if (findError || !user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const isMatch = await bcrypt.compare(current_password, user.password);
 
     if (!isMatch) {
       return res.status(400).json({ message: 'Current password is incorrect' });
@@ -129,7 +140,14 @@ router.put('/change-password', authenticate, [
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(new_password, salt);
 
-    await pool.execute('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, req.user.id]);
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ password: hashedPassword })
+      .eq('id', req.user.id);
+
+    if (updateError) {
+      return res.status(500).json({ message: 'Server error updating password' });
+    }
 
     res.json({ message: 'Password changed successfully' });
   } catch (error) {

@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -22,32 +22,47 @@ router.post('/', authenticate, [
     const { receiver_id, content, ad_id } = req.body;
 
     // Check if receiver exists
-    const [receivers] = await pool.execute('SELECT id FROM users WHERE id = ?', [receiver_id]);
-    if (receivers.length === 0) {
+    const { data: receiver, error: receiverError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', receiver_id)
+      .single();
+
+    if (receiverError || !receiver) {
       return res.status(404).json({ message: 'Receiver not found' });
     }
 
     // Insert message
-    const [result] = await pool.execute(
-      'INSERT INTO messages (sender_id, receiver_id, ad_id, content) VALUES (?, ?, ?, ?)',
-      [req.user.id, receiver_id, ad_id || null, content]
-    );
+    const { data: newMessage, error: insertError } = await supabase
+      .from('messages')
+      .insert({
+        sender_id: req.user.id,
+        receiver_id,
+        ad_id: ad_id || null,
+        content
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('Insert message error:', insertError);
+      return res.status(500).json({ message: 'Server error' });
+    }
 
     // Create notification for receiver
-    await pool.execute(
-      `INSERT INTO notifications (user_id, type, title, title_ar, message, message_ar, link_url) 
-       VALUES (?, 'message', 'New Message', 'رسالة جديدة', ?, ?, ?)`,
-      [
-        receiver_id,
-        `You have a new message from ${req.user.name}`,
-        `لديك رسالة جديدة من ${req.user.name}`,
-        `/messages/${result.insertId}`
-      ]
-    );
+    await supabase
+      .from('notifications')
+      .insert({
+        user_id: receiver_id,
+        type: 'message',
+        title: 'New Message',
+        title_ar: 'رسالة جديدة',
+        message: `You have a new message from ${req.user.name}`,
+        message_ar: `لديك رسالة جديدة من ${req.user.name}`,
+        link_url: `/messages/${newMessage.id}`
+      });
 
-    const [message] = await pool.execute('SELECT * FROM messages WHERE id = ?', [result.insertId]);
-
-    res.status(201).json({ message: message[0] });
+    res.status(201).json({ message: newMessage });
   } catch (error) {
     console.error('Send message error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -59,31 +74,55 @@ router.post('/', authenticate, [
 // @access  Private
 router.get('/', authenticate, async (req, res) => {
   try {
-    const [conversations] = await pool.execute(
-      `SELECT DISTINCT 
-        CASE 
-          WHEN sender_id = ? THEN receiver_id 
-          ELSE sender_id 
-        END as other_user_id,
-        u.name as other_user_name,
-        u.profile_image as other_user_image,
-        (SELECT content FROM messages m2 
-         WHERE (m2.sender_id = ? AND m2.receiver_id = other_user_id) 
-            OR (m2.sender_id = other_user_id AND m2.receiver_id = ?)
-         ORDER BY m2.created_at DESC LIMIT 1) as last_message,
-        (SELECT created_at FROM messages m2 
-         WHERE (m2.sender_id = ? AND m2.receiver_id = other_user_id) 
-            OR (m2.sender_id = other_user_id AND m2.receiver_id = ?)
-         ORDER BY m2.created_at DESC LIMIT 1) as last_message_time,
-        (SELECT COUNT(*) FROM messages m2 
-         WHERE m2.receiver_id = ? AND m2.sender_id = other_user_id AND m2.is_read = FALSE) as unread_count
-       FROM messages m
-       JOIN users u ON u.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END
-       WHERE m.sender_id = ? OR m.receiver_id = ?
-       GROUP BY other_user_id, u.name, u.profile_image
-       ORDER BY last_message_time DESC`,
-      [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]
-    );
+    // Get all messages where user is sender or receiver
+    const { data: messages, error: messagesError } = await supabase
+      .from('messages')
+      .select('*')
+      .or(`sender_id.eq.${req.user.id},receiver_id.eq.${req.user.id}`)
+      .order('created_at', { ascending: false });
+
+    if (messagesError) {
+      console.error('Get messages error:', messagesError);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    // Group messages by conversation partner
+    const conversationsMap = new Map();
+
+    for (const message of messages || []) {
+      const otherUserId = message.sender_id === req.user.id 
+        ? message.receiver_id 
+        : message.sender_id;
+
+      if (!conversationsMap.has(otherUserId)) {
+        // Get other user info
+        const { data: otherUser } = await supabase
+          .from('users')
+          .select('id, name, profile_image')
+          .eq('id', otherUserId)
+          .single();
+
+        // Get unread count
+        const { count: unreadCount } = await supabase
+          .from('messages')
+          .select('*', { count: 'exact', head: true })
+          .eq('receiver_id', req.user.id)
+          .eq('sender_id', otherUserId)
+          .eq('is_read', false);
+
+        conversationsMap.set(otherUserId, {
+          other_user_id: otherUserId,
+          other_user_name: otherUser?.name || '',
+          other_user_image: otherUser?.profile_image || null,
+          last_message: message.content,
+          last_message_time: message.created_at,
+          unread_count: unreadCount || 0
+        });
+      }
+    }
+
+    const conversations = Array.from(conversationsMap.values())
+      .sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
 
     res.json({ conversations });
   } catch (error) {
@@ -99,26 +138,49 @@ router.get('/:userId', authenticate, async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const [messages] = await pool.execute(
-      `SELECT m.*, 
-        u1.name as sender_name, u1.profile_image as sender_image,
-        u2.name as receiver_name, u2.profile_image as receiver_image
-       FROM messages m
-       JOIN users u1 ON m.sender_id = u1.id
-       JOIN users u2 ON m.receiver_id = u2.id
-       WHERE (m.sender_id = ? AND m.receiver_id = ?) 
-          OR (m.sender_id = ? AND m.receiver_id = ?)
-       ORDER BY m.created_at ASC`,
-      [req.user.id, userId, userId, req.user.id]
-    );
+    // Get messages between the two users
+    const { data: messages, error: messagesError } = await supabase
+      .from('messages')
+      .select('*')
+      .or(`and(sender_id.eq.${req.user.id},receiver_id.eq.${userId}),and(sender_id.eq.${userId},receiver_id.eq.${req.user.id})`)
+      .order('created_at', { ascending: true });
+
+    if (messagesError) {
+      console.error('Get messages error:', messagesError);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    // Get user info for sender and receiver
+    const userIds = [...new Set((messages || []).flatMap(msg => [msg.sender_id, msg.receiver_id]))];
+    const { data: users } = await supabase
+      .from('users')
+      .select('id, name, profile_image')
+      .in('id', userIds);
+
+    const usersMap = new Map((users || []).map(user => [user.id, user]));
 
     // Mark messages as read
-    await pool.execute(
-      'UPDATE messages SET is_read = TRUE WHERE receiver_id = ? AND sender_id = ? AND is_read = FALSE',
-      [req.user.id, userId]
-    );
+    await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('receiver_id', req.user.id)
+      .eq('sender_id', userId)
+      .eq('is_read', false);
 
-    res.json({ messages });
+    // Transform messages to match expected format
+    const transformedMessages = (messages || []).map(msg => {
+      const sender = usersMap.get(msg.sender_id);
+      const receiver = usersMap.get(msg.receiver_id);
+      return {
+        ...msg,
+        sender_name: sender?.name || '',
+        sender_image: sender?.profile_image || null,
+        receiver_name: receiver?.name || '',
+        receiver_image: receiver?.profile_image || null
+      };
+    });
+
+    res.json({ messages: transformedMessages });
   } catch (error) {
     console.error('Get messages error:', error);
     res.status(500).json({ message: 'Server error' });

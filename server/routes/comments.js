@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -22,39 +22,62 @@ router.post('/', authenticate, [
     const { ad_id, content, parent_id } = req.body;
 
     // Verify ad exists
-    const [ads] = await pool.execute('SELECT user_id FROM ads WHERE id = ?', [ad_id]);
-    if (ads.length === 0) {
+    const { data: ad, error: adError } = await supabase
+      .from('ads')
+      .select('user_id')
+      .eq('id', ad_id)
+      .single();
+
+    if (adError || !ad) {
       return res.status(404).json({ message: 'Ad not found' });
     }
 
-    const [result] = await pool.execute(
-      'INSERT INTO comments (ad_id, user_id, content, parent_id) VALUES (?, ?, ?, ?)',
-      [ad_id, req.user.id, content, parent_id || null]
-    );
+    const { data: comment, error: insertError } = await supabase
+      .from('comments')
+      .insert({
+        ad_id,
+        user_id: req.user.id,
+        content,
+        parent_id: parent_id || null
+      })
+      .select()
+      .single();
 
-    // Notify ad owner
-    if (ads[0].user_id !== req.user.id) {
-      await pool.execute(
-        `INSERT INTO notifications (user_id, type, title, title_ar, message, message_ar, link_url) 
-         VALUES (?, 'comment', 'New Comment', 'تعليق جديد', ?, ?, ?)`,
-        [
-          ads[0].user_id,
-          `${req.user.name} commented on your ad`,
-          `علق ${req.user.name} على إعلانك`,
-          `/ads/${ad_id}`
-        ]
-      );
+    if (insertError) {
+      console.error('Insert comment error:', insertError);
+      return res.status(500).json({ message: 'Server error' });
     }
 
-    const [comment] = await pool.execute(
-      `SELECT c.*, u.name as user_name, u.profile_image 
-       FROM comments c 
-       JOIN users u ON c.user_id = u.id 
-       WHERE c.id = ?`,
-      [result.insertId]
-    );
+    // Get user info
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, name, profile_image')
+      .eq('id', req.user.id)
+      .single();
 
-    res.status(201).json({ comment: comment[0] });
+    // Notify ad owner
+    if (ad.user_id !== req.user.id) {
+      await supabase
+        .from('notifications')
+        .insert({
+          user_id: ad.user_id,
+          type: 'comment',
+          title: 'New Comment',
+          title_ar: 'تعليق جديد',
+          message: `${req.user.name} commented on your ad`,
+          message_ar: `علق ${req.user.name} على إعلانك`,
+          link_url: `/ads/${ad_id}`
+        });
+    }
+
+    // Transform comment to match expected format
+    const transformedComment = {
+      ...comment,
+      user_name: user?.name || '',
+      profile_image: user?.profile_image || null
+    };
+
+    res.status(201).json({ comment: transformedComment });
   } catch (error) {
     console.error('Add comment error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -68,16 +91,37 @@ router.get('/:adId', authenticate, async (req, res) => {
   try {
     const { adId } = req.params;
 
-    const [comments] = await pool.execute(
-      `SELECT c.*, u.name as user_name, u.profile_image 
-       FROM comments c 
-       JOIN users u ON c.user_id = u.id 
-       WHERE c.ad_id = ? 
-       ORDER BY c.created_at ASC`,
-      [adId]
-    );
+    const { data: comments, error } = await supabase
+      .from('comments')
+      .select('*')
+      .eq('ad_id', adId)
+      .order('created_at', { ascending: true });
 
-    res.json({ comments });
+    if (error) {
+      console.error('Get comments error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    // Get user info for all comments
+    const userIds = [...new Set((comments || []).map(c => c.user_id))];
+    const { data: users } = await supabase
+      .from('users')
+      .select('id, name, profile_image')
+      .in('id', userIds);
+
+    const usersMap = new Map((users || []).map(user => [user.id, user]));
+
+    // Transform comments to match expected format
+    const transformedComments = (comments || []).map(comment => {
+      const user = usersMap.get(comment.user_id);
+      return {
+        ...comment,
+        user_name: user?.name || '',
+        profile_image: user?.profile_image || null
+      };
+    });
+
+    res.json({ comments: transformedComments });
   } catch (error) {
     console.error('Get comments error:', error);
     res.status(500).json({ message: 'Server error' });

@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
@@ -10,15 +10,23 @@ const router = express.Router();
 // @access  Private (Subscriber)
 router.get('/status', authenticate, authorize('subscriber'), async (req, res) => {
   try {
-    const [subscriptions] = await pool.execute(
-      `SELECT * FROM subscriptions 
-       WHERE user_id = ? AND payment_status = 'paid' 
-       AND end_date >= CURDATE() 
-       ORDER BY end_date DESC LIMIT 1`,
-      [req.user.id]
-    );
+    const today = new Date().toISOString().split('T')[0];
+    
+    const { data: subscriptions, error } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('payment_status', 'paid')
+      .gte('end_date', today)
+      .order('end_date', { ascending: false })
+      .limit(1);
 
-    if (subscriptions.length === 0) {
+    if (error) {
+      console.error('Get subscription error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    if (!subscriptions || subscriptions.length === 0) {
       return res.json({ 
         active: false, 
         message: 'No active subscription found' 
@@ -51,12 +59,15 @@ router.post('/create', authenticate, authorize('subscriber'), [
     const { payment_id, type } = req.body;
 
     // Verify payment
-    const [payments] = await pool.execute(
-      'SELECT id, status FROM payments WHERE id = ? AND user_id = ? AND payment_type = ?',
-      [payment_id, req.user.id, 'subscription']
-    );
+    const { data: payment, error: findError } = await supabase
+      .from('payments')
+      .select('id, status')
+      .eq('id', payment_id)
+      .eq('user_id', req.user.id)
+      .eq('payment_type', 'subscription')
+      .single();
 
-    if (payments.length === 0 || payments[0].status !== 'completed') {
+    if (findError || !payment || payment.status !== 'completed') {
       return res.status(400).json({ message: 'Invalid or incomplete payment' });
     }
 
@@ -66,18 +77,25 @@ router.post('/create', authenticate, authorize('subscriber'), [
     endDate.setMonth(endDate.getMonth() + 1);
 
     // Create subscription
-    const [result] = await pool.execute(
-      `INSERT INTO subscriptions (user_id, type, start_date, end_date, payment_status, payment_id) 
-       VALUES (?, ?, ?, ?, 'paid', ?)`,
-      [req.user.id, type, startDate, endDate, payment_id]
-    );
+    const { data: subscription, error: insertError } = await supabase
+      .from('subscriptions')
+      .insert({
+        user_id: req.user.id,
+        type,
+        start_date: startDate.toISOString().split('T')[0],
+        end_date: endDate.toISOString().split('T')[0],
+        payment_status: 'paid',
+        payment_id
+      })
+      .select()
+      .single();
 
-    const [subscription] = await pool.execute(
-      'SELECT * FROM subscriptions WHERE id = ?',
-      [result.insertId]
-    );
+    if (insertError) {
+      console.error('Create subscription error:', insertError);
+      return res.status(500).json({ message: 'Server error' });
+    }
 
-    res.status(201).json({ subscription: subscription[0] });
+    res.status(201).json({ subscription });
   } catch (error) {
     console.error('Create subscription error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -89,12 +107,18 @@ router.post('/create', authenticate, authorize('subscriber'), [
 // @access  Private (Subscriber)
 router.get('/history', authenticate, authorize('subscriber'), async (req, res) => {
   try {
-    const [subscriptions] = await pool.execute(
-      'SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC',
-      [req.user.id]
-    );
+    const { data: subscriptions, error } = await supabase
+      .from('subscriptions')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
 
-    res.json({ subscriptions });
+    if (error) {
+      console.error('Get subscription history error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.json({ subscriptions: subscriptions || [] });
   } catch (error) {
     console.error('Get subscription history error:', error);
     res.status(500).json({ message: 'Server error' });

@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { sendVerificationEmail, sendPasswordResetEmail } = require('../utils/email');
 
@@ -33,12 +33,13 @@ router.post('/register', [
     const { name, email, password, role, phone, company_name } = req.body;
 
     // Check if user exists
-    const [existingUsers] = await pool.execute(
-      'SELECT id FROM users WHERE email = ?',
-      [email]
-    );
+    const { data: existingUsers } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .limit(1);
 
-    if (existingUsers.length > 0) {
+    if (existingUsers && existingUsers.length > 0) {
       return res.status(400).json({ message: 'User already exists with this email' });
     }
 
@@ -50,23 +51,36 @@ router.post('/register', [
     const verificationToken = jwt.sign({ email }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     // Create user
-    const [result] = await pool.execute(
-      `INSERT INTO users (name, email, password, role, phone, company_name, verification_token) 
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [name, email, hashedPassword, role, phone || null, company_name || null, verificationToken]
-    );
+    const { data: newUser, error: insertError } = await supabase
+      .from('users')
+      .insert({
+        name,
+        email,
+        password: hashedPassword,
+        role,
+        phone: phone || null,
+        company_name: company_name || null,
+        verification_token: verificationToken
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('Insert user error:', insertError);
+      return res.status(500).json({ message: 'Server error during registration' });
+    }
 
     // Send verification email
     await sendVerificationEmail(email, name, verificationToken);
 
     // Generate JWT token
-    const token = generateToken(result.insertId);
+    const token = generateToken(newUser.id);
 
     res.status(201).json({
       message: 'User registered successfully. Please check your email for verification.',
       token,
       user: {
-        id: result.insertId,
+        id: newUser.id,
         name,
         email,
         role
@@ -94,16 +108,15 @@ router.post('/login', [
     const { email, password } = req.body;
 
     // Find user
-    const [users] = await pool.execute(
-      'SELECT id, name, email, password, role, email_verified FROM users WHERE email = ?',
-      [email]
-    );
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('id, name, email, password, role, email_verified')
+      .eq('email', email)
+      .single();
 
-    if (users.length === 0) {
+    if (findError || !user) {
       return res.status(401).json({ message: 'Invalid credentials' });
     }
-
-    const user = users[0];
 
     // Check password
     const isMatch = await bcrypt.compare(password, user.password);
@@ -139,19 +152,21 @@ router.get('/verify/:token', async (req, res) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
-    const [users] = await pool.execute(
-      'SELECT id, verification_token FROM users WHERE email = ? AND verification_token = ?',
-      [decoded.email, token]
-    );
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('id, verification_token')
+      .eq('email', decoded.email)
+      .eq('verification_token', token)
+      .single();
 
-    if (users.length === 0) {
+    if (findError || !user) {
       return res.status(400).json({ message: 'Invalid or expired verification token' });
     }
 
-    await pool.execute(
-      'UPDATE users SET email_verified = TRUE, verification_token = NULL WHERE id = ?',
-      [users[0].id]
-    );
+    await supabase
+      .from('users')
+      .update({ email_verified: true, verification_token: null })
+      .eq('id', user.id);
 
     res.json({ message: 'Email verified successfully' });
   } catch (error) {
@@ -168,22 +183,29 @@ router.post('/forgot-password', [
   try {
     const { email } = req.body;
 
-    const [users] = await pool.execute('SELECT id, name FROM users WHERE email = ?', [email]);
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('id, name')
+      .eq('email', email)
+      .single();
 
-    if (users.length === 0) {
+    if (findError || !user) {
       // Don't reveal if email exists for security
       return res.json({ message: 'If email exists, password reset link has been sent' });
     }
 
-    const resetToken = jwt.sign({ userId: users[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    const resetToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
     const resetExpires = new Date(Date.now() + 3600000); // 1 hour
 
-    await pool.execute(
-      'UPDATE users SET reset_password_token = ?, reset_password_expires = ? WHERE id = ?',
-      [resetToken, resetExpires, users[0].id]
-    );
+    await supabase
+      .from('users')
+      .update({ 
+        reset_password_token: resetToken, 
+        reset_password_expires: resetExpires.toISOString() 
+      })
+      .eq('id', user.id);
 
-    await sendPasswordResetEmail(email, users[0].name, resetToken);
+    await sendPasswordResetEmail(email, user.name, resetToken);
 
     res.json({ message: 'Password reset link has been sent to your email' });
   } catch (error) {
@@ -204,22 +226,29 @@ router.post('/reset-password', [
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const [users] = await pool.execute(
-      'SELECT id FROM users WHERE id = ? AND reset_password_token = ? AND reset_password_expires > NOW()',
-      [decoded.userId, token]
-    );
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('id', decoded.userId)
+      .eq('reset_password_token', token)
+      .gt('reset_password_expires', new Date().toISOString())
+      .single();
 
-    if (users.length === 0) {
+    if (findError || !user) {
       return res.status(400).json({ message: 'Invalid or expired reset token' });
     }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    await pool.execute(
-      'UPDATE users SET password = ?, reset_password_token = NULL, reset_password_expires = NULL WHERE id = ?',
-      [hashedPassword, users[0].id]
-    );
+    await supabase
+      .from('users')
+      .update({ 
+        password: hashedPassword, 
+        reset_password_token: null, 
+        reset_password_expires: null 
+      })
+      .eq('id', user.id);
 
     res.json({ message: 'Password reset successfully' });
   } catch (error) {
@@ -232,12 +261,17 @@ router.post('/reset-password', [
 // @access  Private
 router.get('/me', authenticate, async (req, res) => {
   try {
-    const [users] = await pool.execute(
-      'SELECT id, name, email, role, phone, company_name, profile_image, language_preference, email_verified FROM users WHERE id = ?',
-      [req.user.id]
-    );
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, email, role, phone, company_name, profile_image, language_preference, email_verified')
+      .eq('id', req.user.id)
+      .single();
 
-    res.json({ user: users[0] });
+    if (error || !user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({ user });
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ message: 'Server error' });

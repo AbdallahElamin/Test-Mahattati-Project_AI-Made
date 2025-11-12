@@ -1,7 +1,7 @@
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -23,32 +23,45 @@ router.post('/create-intent', authenticate, [
     const { amount, payment_type, currency = 'SAR', metadata = {} } = req.body;
 
     // Create payment record
-    const [paymentResult] = await pool.execute(
-      `INSERT INTO payments (user_id, amount, currency, gateway, payment_type, status, metadata) 
-       VALUES (?, ?, ?, 'stripe', ?, 'pending', ?)`,
-      [req.user.id, amount, currency, payment_type, JSON.stringify(metadata)]
-    );
+    const { data: paymentResult, error: insertError } = await supabase
+      .from('payments')
+      .insert({
+        user_id: req.user.id,
+        amount,
+        currency,
+        gateway: 'stripe',
+        payment_type,
+        status: 'pending',
+        metadata: metadata
+      })
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('Create payment error:', insertError);
+      return res.status(500).json({ message: 'Server error creating payment' });
+    }
 
     // Create Stripe payment intent
     const paymentIntent = await stripe.paymentIntents.create({
       amount: Math.round(amount * 100), // Convert to cents
       currency: currency.toLowerCase(),
       metadata: {
-        payment_id: paymentResult.insertId.toString(),
+        payment_id: paymentResult.id.toString(),
         user_id: req.user.id.toString(),
         payment_type
       }
     });
 
     // Update payment with transaction ID
-    await pool.execute(
-      'UPDATE payments SET transaction_id = ? WHERE id = ?',
-      [paymentIntent.id, paymentResult.insertId]
-    );
+    await supabase
+      .from('payments')
+      .update({ transaction_id: paymentIntent.id })
+      .eq('id', paymentResult.id);
 
     res.json({
       client_secret: paymentIntent.client_secret,
-      payment_id: paymentResult.insertId
+      payment_id: paymentResult.id
     });
   } catch (error) {
     console.error('Create payment intent error:', error);
@@ -72,16 +85,16 @@ router.post('/confirm', authenticate, [
     const { payment_id, transaction_id } = req.body;
 
     // Verify payment belongs to user
-    const [payments] = await pool.execute(
-      'SELECT * FROM payments WHERE id = ? AND user_id = ?',
-      [payment_id, req.user.id]
-    );
+    const { data: payment, error: findError } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('id', payment_id)
+      .eq('user_id', req.user.id)
+      .single();
 
-    if (payments.length === 0) {
+    if (findError || !payment) {
       return res.status(404).json({ message: 'Payment not found' });
     }
-
-    const payment = payments[0];
 
     // Verify with Stripe if gateway is Stripe
     if (payment.gateway === 'stripe') {
@@ -92,25 +105,24 @@ router.post('/confirm', authenticate, [
     }
 
     // Update payment status
-    await pool.execute(
-      'UPDATE payments SET status = ? WHERE id = ?',
-      ['completed', payment_id]
-    );
+    await supabase
+      .from('payments')
+      .update({ status: 'completed' })
+      .eq('id', payment_id);
 
     // Handle payment type specific logic
     if (payment.payment_type === 'ad_promotion') {
-      const metadata = JSON.parse(payment.metadata || '{}');
+      const metadata = payment.metadata || {};
       if (metadata.ad_id) {
-        await pool.execute(
-          `UPDATE ads SET is_promoted = TRUE, promotion_type = ?, promotion_expires_at = ? 
-           WHERE id = ? AND user_id = ?`,
-          [
-            metadata.promotion_type || 'top_banner',
-            metadata.expires_at || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-            metadata.ad_id,
-            req.user.id
-          ]
-        );
+        await supabase
+          .from('ads')
+          .update({
+            is_promoted: true,
+            promotion_type: metadata.promotion_type || 'top_banner',
+            promotion_expires_at: metadata.expires_at || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+          })
+          .eq('id', metadata.ad_id)
+          .eq('user_id', req.user.id);
       }
     }
 
@@ -126,14 +138,22 @@ router.post('/confirm', authenticate, [
 // @access  Private
 router.get('/history', authenticate, async (req, res) => {
   try {
-    const [payments] = await pool.execute(
-      'SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
-      [req.user.id]
-    );
+    const { data: payments, error } = await supabase
+      .from('payments')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false })
+      .limit(50);
 
-    const parsedPayments = payments.map(payment => ({
+    if (error) {
+      console.error('Get payment history error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    // Supabase automatically handles JSON fields
+    const parsedPayments = (payments || []).map(payment => ({
       ...payment,
-      metadata: payment.metadata ? JSON.parse(payment.metadata) : {}
+      metadata: payment.metadata || {}
     }));
 
     res.json({ payments: parsedPayments });

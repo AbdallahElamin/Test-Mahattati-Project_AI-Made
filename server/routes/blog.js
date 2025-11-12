@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const { body, validationResult } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
@@ -27,15 +27,37 @@ const upload = multer({
 // @access  Public
 router.get('/', async (req, res) => {
   try {
-    const [posts] = await pool.execute(
-      `SELECT bp.*, u.name as author_name 
-       FROM blog_posts bp 
-       JOIN users u ON bp.author_id = u.id 
-       WHERE bp.status = 'published' 
-       ORDER BY bp.publish_date DESC, bp.created_at DESC`
-    );
+    const { data: posts, error } = await supabase
+      .from('blog_posts')
+      .select('*')
+      .eq('status', 'published')
+      .order('publish_date', { ascending: false })
+      .order('created_at', { ascending: false });
 
-    res.json({ posts });
+    if (error) {
+      console.error('Get blog posts error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    // Get author info for all posts
+    const authorIds = [...new Set((posts || []).map(p => p.author_id))];
+    const { data: authors } = await supabase
+      .from('users')
+      .select('id, name')
+      .in('id', authorIds);
+
+    const authorsMap = new Map((authors || []).map(author => [author.id, author]));
+
+    // Transform posts to match expected format
+    const transformedPosts = (posts || []).map(post => {
+      const author = authorsMap.get(post.author_id);
+      return {
+        ...post,
+        author_name: author?.name || ''
+      };
+    });
+
+    res.json({ posts: transformedPosts });
   } catch (error) {
     console.error('Get blog posts error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -49,25 +71,37 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [posts] = await pool.execute(
-      `SELECT bp.*, u.name as author_name 
-       FROM blog_posts bp 
-       JOIN users u ON bp.author_id = u.id 
-       WHERE bp.id = ? AND bp.status = 'published'`,
-      [id]
-    );
+    const { data: post, error: findError } = await supabase
+      .from('blog_posts')
+      .select('*')
+      .eq('id', id)
+      .eq('status', 'published')
+      .single();
 
-    if (posts.length === 0) {
+    if (findError || !post) {
       return res.status(404).json({ message: 'Blog post not found' });
     }
 
-    // Increment views
-    await pool.execute(
-      'UPDATE blog_posts SET views_count = views_count + 1 WHERE id = ?',
-      [id]
-    );
+    // Get author info
+    const { data: author } = await supabase
+      .from('users')
+      .select('id, name')
+      .eq('id', post.author_id)
+      .single();
 
-    res.json({ post: posts[0] });
+    // Increment views
+    await supabase
+      .from('blog_posts')
+      .update({ views_count: (post.views_count || 0) + 1 })
+      .eq('id', id);
+
+    // Transform post to match expected format
+    const transformedPost = {
+      ...post,
+      author_name: author?.name || ''
+    };
+
+    res.json({ post: transformedPost });
   } catch (error) {
     console.error('Get blog post error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -92,24 +126,28 @@ router.post('/', authenticate, authorize('system_manager', 'marketing_manager'),
     const mediaUrl = req.file ? `/uploads/blog/${req.file.filename}` : null;
     const mediaType = req.file ? (req.file.mimetype.startsWith('video/') ? 'video' : 'image') : 'none';
 
-    const [result] = await pool.execute(
-      `INSERT INTO blog_posts (author_id, title, title_ar, content, content_ar, media_url, media_type, status, publish_date) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        req.user.id,
+    const { data: post, error: insertError } = await supabase
+      .from('blog_posts')
+      .insert({
+        author_id: req.user.id,
         title,
-        title_ar || null,
+        title_ar: title_ar || null,
         content,
-        content_ar || null,
-        mediaUrl,
-        mediaType,
+        content_ar: content_ar || null,
+        media_url: mediaUrl,
+        media_type: mediaType,
         status,
-        status === 'published' ? new Date() : null
-      ]
-    );
+        publish_date: status === 'published' ? new Date().toISOString() : null
+      })
+      .select()
+      .single();
 
-    const [post] = await pool.execute('SELECT * FROM blog_posts WHERE id = ?', [result.insertId]);
-    res.status(201).json({ post: post[0] });
+    if (insertError) {
+      console.error('Create blog post error:', insertError);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.status(201).json({ post });
   } catch (error) {
     console.error('Create blog post error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -125,44 +163,57 @@ router.put('/:id', authenticate, authorize('system_manager', 'marketing_manager'
     const { id } = req.params;
 
     // Check ownership or manager role
-    const [posts] = await pool.execute('SELECT author_id FROM blog_posts WHERE id = ?', [id]);
-    if (posts.length === 0) {
+    const { data: existingPost, error: findError } = await supabase
+      .from('blog_posts')
+      .select('author_id, publish_date')
+      .eq('id', id)
+      .single();
+
+    if (findError || !existingPost) {
       return res.status(404).json({ message: 'Blog post not found' });
     }
 
-    const updateFields = [];
-    const updateValues = [];
+    const updateData = {};
 
     const allowedFields = ['title', 'title_ar', 'content', 'content_ar', 'status'];
     allowedFields.forEach(field => {
       if (req.body[field] !== undefined) {
-        updateFields.push(`${field} = ?`);
-        updateValues.push(req.body[field]);
+        updateData[field] = req.body[field];
       }
     });
 
     if (req.file) {
-      updateFields.push('media_url = ?');
-      updateFields.push('media_type = ?');
-      updateValues.push(`/uploads/blog/${req.file.filename}`);
-      updateValues.push(req.file.mimetype.startsWith('video/') ? 'video' : 'image');
+      updateData.media_url = `/uploads/blog/${req.file.filename}`;
+      updateData.media_type = req.file.mimetype.startsWith('video/') ? 'video' : 'image';
     }
 
-    if (req.body.status === 'published' && !posts[0].publish_date) {
-      updateFields.push('publish_date = ?');
-      updateValues.push(new Date());
+    if (req.body.status === 'published' && !existingPost.publish_date) {
+      updateData.publish_date = new Date().toISOString();
     }
 
-    if (updateFields.length > 0) {
-      updateValues.push(id);
-      await pool.execute(
-        `UPDATE blog_posts SET ${updateFields.join(', ')} WHERE id = ?`,
-        updateValues
-      );
-    }
+    if (Object.keys(updateData).length > 0) {
+      const { data: updatedPost, error: updateError } = await supabase
+        .from('blog_posts')
+        .update(updateData)
+        .eq('id', id)
+        .select()
+        .single();
 
-    const [updatedPost] = await pool.execute('SELECT * FROM blog_posts WHERE id = ?', [id]);
-    res.json({ post: updatedPost[0] });
+      if (updateError || !updatedPost) {
+        return res.status(500).json({ message: 'Server error updating blog post' });
+      }
+
+      res.json({ post: updatedPost });
+    } else {
+      // No fields to update, return existing post
+      const { data: post } = await supabase
+        .from('blog_posts')
+        .select('*')
+        .eq('id', id)
+        .single();
+
+      res.json({ post });
+    }
   } catch (error) {
     console.error('Update blog post error:', error);
     res.status(500).json({ message: 'Server error' });

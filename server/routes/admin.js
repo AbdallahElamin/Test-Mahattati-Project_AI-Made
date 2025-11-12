@@ -1,6 +1,6 @@
 const express = require('express');
 const { body, validationResult, query } = require('express-validator');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
 const router = express.Router();
@@ -21,22 +21,32 @@ router.get('/users', [
     const { role, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
-    let query = 'SELECT id, name, email, role, phone, company_name, email_verified, created_at FROM users';
-    const params = [];
+    let usersQuery = supabase
+      .from('users')
+      .select('id, name, email, role, phone, company_name, email_verified, created_at', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(offset, offset + parseInt(limit) - 1);
 
     if (role) {
-      query += ' WHERE role = ?';
-      params.push(role);
+      usersQuery = usersQuery.eq('role', role);
     }
 
-    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
+    const { data: users, error, count } = await usersQuery;
 
-    const [users] = await pool.execute(query, params);
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM users' + (role ? ' WHERE role = ?' : ''), role ? [role] : []);
-    const total = countResult[0].total;
+    if (error) {
+      console.error('Get users error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
 
-    res.json({ users, pagination: { page: parseInt(page), limit: parseInt(limit), total, pages: Math.ceil(total / limit) } });
+    res.json({ 
+      users: users || [], 
+      pagination: { 
+        page: parseInt(page), 
+        limit: parseInt(limit), 
+        total: count || 0, 
+        pages: Math.ceil((count || 0) / limit) 
+      } 
+    });
   } catch (error) {
     console.error('Get users error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -52,29 +62,32 @@ router.put('/users/:id', [
 ], async (req, res) => {
   try {
     const { id } = req.params;
-    const updateFields = [];
-    const updateValues = [];
+    const updateData = {};
 
     const allowedFields = ['name', 'email', 'role', 'phone', 'company_name', 'email_verified'];
     allowedFields.forEach(field => {
       if (req.body[field] !== undefined) {
-        updateFields.push(`${field} = ?`);
-        updateValues.push(req.body[field]);
+        updateData[field] = req.body[field];
       }
     });
 
-    if (updateFields.length === 0) {
+    if (Object.keys(updateData).length === 0) {
       return res.status(400).json({ message: 'No fields to update' });
     }
 
-    updateValues.push(id);
-    await pool.execute(
-      `UPDATE users SET ${updateFields.join(', ')} WHERE id = ?`,
-      updateValues
-    );
+    const { data: user, error } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
 
-    const [user] = await pool.execute('SELECT * FROM users WHERE id = ?', [id]);
-    res.json({ user: user[0] });
+    if (error || !user) {
+      console.error('Update user error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.json({ user });
   } catch (error) {
     console.error('Update user error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -93,58 +106,110 @@ router.get('/reports', [
     const { type, start_date, end_date } = req.query;
     let report = {};
 
-    const dateFilter = start_date && end_date ? 
-      `WHERE created_at BETWEEN ? AND ?` : 
-      start_date ? `WHERE created_at >= ?` : 
-      end_date ? `WHERE created_at <= ?` : '';
-    const dateParams = [];
-    if (start_date) dateParams.push(start_date);
-    if (end_date) dateParams.push(end_date);
-
     switch (type) {
       case 'users':
-        const [userStats] = await pool.execute(
-          `SELECT role, COUNT(*) as count FROM users ${dateFilter} GROUP BY role`,
-          dateParams
-        );
-        const [totalUsers] = await pool.execute('SELECT COUNT(*) as total FROM users' + (dateFilter ? ' ' + dateFilter : ''), dateParams);
-        report = { by_role: userStats, total: totalUsers[0].total };
+        // Get all users (with date filter if provided)
+        let usersQuery = supabase.from('users').select('role', { count: 'exact' });
+        if (start_date) usersQuery = usersQuery.gte('created_at', start_date);
+        if (end_date) usersQuery = usersQuery.lte('created_at', end_date);
+        
+        const { data: users, count: totalUsers } = await usersQuery;
+        
+        // Group by role
+        const userStats = {};
+        (users || []).forEach(user => {
+          userStats[user.role] = (userStats[user.role] || 0) + 1;
+        });
+        
+        const byRole = Object.keys(userStats).map(role => ({
+          role,
+          count: userStats[role]
+        }));
+        
+        report = { by_role: byRole, total: totalUsers || 0 };
         break;
 
       case 'ads':
-        const [adStats] = await pool.execute(
-          `SELECT status, COUNT(*) as count FROM ads ${dateFilter} GROUP BY status`,
-          dateParams
-        );
-        const [totalAds] = await pool.execute('SELECT COUNT(*) as total FROM ads' + (dateFilter ? ' ' + dateFilter : ''), dateParams);
-        const [promotedAds] = await pool.execute('SELECT COUNT(*) as total FROM ads WHERE is_promoted = TRUE' + (dateFilter ? ' AND ' + dateFilter.replace('WHERE', '') : ''), dateParams);
-        report = { by_status: adStats, total: totalAds[0].total, promoted: promotedAds[0].total };
+        let adsQuery = supabase.from('ads').select('status, is_promoted', { count: 'exact' });
+        if (start_date) adsQuery = adsQuery.gte('created_at', start_date);
+        if (end_date) adsQuery = adsQuery.lte('created_at', end_date);
+        
+        const { data: ads, count: totalAds } = await adsQuery;
+        
+        // Group by status
+        const adStats = {};
+        let promotedCount = 0;
+        (ads || []).forEach(ad => {
+          adStats[ad.status] = (adStats[ad.status] || 0) + 1;
+          if (ad.is_promoted) promotedCount++;
+        });
+        
+        const byStatus = Object.keys(adStats).map(status => ({
+          status,
+          count: adStats[status]
+        }));
+        
+        report = { by_status: byStatus, total: totalAds || 0, promoted: promotedCount };
         break;
 
       case 'payments':
-        const [paymentStats] = await pool.execute(
-          `SELECT gateway, status, SUM(amount) as total_amount, COUNT(*) as count 
-           FROM payments ${dateFilter} GROUP BY gateway, status`,
-          dateParams
-        );
-        const [totalRevenue] = await pool.execute(
-          `SELECT SUM(amount) as total FROM payments WHERE status = 'completed'` + (dateFilter ? ' AND ' + dateFilter.replace('WHERE', '') : ''),
-          dateParams.filter((_, i) => !dateParams[i] || dateParams[i].includes('2024'))
-        );
-        report = { by_gateway_status: paymentStats, total_revenue: totalRevenue[0].total || 0 };
+        let paymentsQuery = supabase.from('payments').select('gateway, status, amount', { count: 'exact' });
+        if (start_date) paymentsQuery = paymentsQuery.gte('created_at', start_date);
+        if (end_date) paymentsQuery = paymentsQuery.lte('created_at', end_date);
+        
+        const { data: payments } = await paymentsQuery;
+        
+        // Group by gateway and status
+        const paymentStats = {};
+        let totalRevenue = 0;
+        (payments || []).forEach(payment => {
+          const key = `${payment.gateway}_${payment.status}`;
+          if (!paymentStats[key]) {
+            paymentStats[key] = {
+              gateway: payment.gateway,
+              status: payment.status,
+              total_amount: 0,
+              count: 0
+            };
+          }
+          paymentStats[key].total_amount += parseFloat(payment.amount || 0);
+          paymentStats[key].count++;
+          
+          if (payment.status === 'completed') {
+            totalRevenue += parseFloat(payment.amount || 0);
+          }
+        });
+        
+        const byGatewayStatus = Object.values(paymentStats);
+        
+        report = { by_gateway_status: byGatewayStatus, total_revenue: totalRevenue };
         break;
 
       case 'subscriptions':
-        const [subStats] = await pool.execute(
-          `SELECT payment_status, COUNT(*) as count FROM subscriptions ${dateFilter} GROUP BY payment_status`,
-          dateParams
-        );
-        const [activeSubs] = await pool.execute(
-          `SELECT COUNT(*) as total FROM subscriptions WHERE payment_status = 'paid' AND end_date >= CURDATE()` + 
-          (dateFilter ? ' AND ' + dateFilter.replace('WHERE', '') : ''),
-          dateParams
-        );
-        report = { by_status: subStats, active: activeSubs[0].total };
+        let subsQuery = supabase.from('subscriptions').select('payment_status, end_date', { count: 'exact' });
+        if (start_date) subsQuery = subsQuery.gte('created_at', start_date);
+        if (end_date) subsQuery = subsQuery.lte('created_at', end_date);
+        
+        const { data: subscriptions } = await subsQuery;
+        
+        // Group by payment_status
+        const subStats = {};
+        const today = new Date().toISOString().split('T')[0];
+        let activeCount = 0;
+        
+        (subscriptions || []).forEach(sub => {
+          subStats[sub.payment_status] = (subStats[sub.payment_status] || 0) + 1;
+          if (sub.payment_status === 'paid' && sub.end_date >= today) {
+            activeCount++;
+          }
+        });
+        
+        const byStatus = Object.keys(subStats).map(status => ({
+          payment_status: status,
+          count: subStats[status]
+        }));
+        
+        report = { by_status: byStatus, active: activeCount };
         break;
     }
 
@@ -168,31 +233,30 @@ router.get('/logs', [
     const { event_type, user_id, page = 1, limit = 100 } = req.query;
     const offset = (page - 1) * limit;
 
-    let query = 'SELECT * FROM logs';
-    const params = [];
-    const conditions = [];
+    let logsQuery = supabase
+      .from('logs')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .range(offset, offset + parseInt(limit) - 1);
 
     if (event_type) {
-      conditions.push('event_type = ?');
-      params.push(event_type);
+      logsQuery = logsQuery.eq('event_type', event_type);
     }
     if (user_id) {
-      conditions.push('user_id = ?');
-      params.push(user_id);
+      logsQuery = logsQuery.eq('user_id', user_id);
     }
 
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
+    const { data: logs, error } = await logsQuery;
+
+    if (error) {
+      console.error('Get logs error:', error);
+      return res.status(500).json({ message: 'Server error' });
     }
 
-    query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-    params.push(parseInt(limit), parseInt(offset));
-
-    const [logs] = await pool.execute(query, params);
-
-    const parsedLogs = logs.map(log => ({
+    // Supabase automatically handles JSON fields
+    const parsedLogs = (logs || []).map(log => ({
       ...log,
-      metadata: log.metadata ? JSON.parse(log.metadata) : {}
+      metadata: log.metadata || {}
     }));
 
     res.json({ logs: parsedLogs });
@@ -218,14 +282,27 @@ router.post('/sponsored-ads', authenticate, authorize('system_manager', 'marketi
 
     const { media_url, media_type, position, title, link_url, start_date, end_date } = req.body;
 
-    const [result] = await pool.execute(
-      `INSERT INTO sponsored_ads (created_by, title, media_url, media_type, position, link_url, start_date, end_date) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [req.user.id, title || null, media_url, media_type, position, link_url || null, start_date || null, end_date || null]
-    );
+    const { data: sponsoredAd, error: insertError } = await supabase
+      .from('sponsored_ads')
+      .insert({
+        created_by: req.user.id,
+        title: title || null,
+        media_url,
+        media_type,
+        position,
+        link_url: link_url || null,
+        start_date: start_date || null,
+        end_date: end_date || null
+      })
+      .select()
+      .single();
 
-    const [sponsoredAd] = await pool.execute('SELECT * FROM sponsored_ads WHERE id = ?', [result.insertId]);
-    res.status(201).json({ sponsored_ad: sponsoredAd[0] });
+    if (insertError) {
+      console.error('Create sponsored ad error:', insertError);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.status(201).json({ sponsored_ad: sponsoredAd });
   } catch (error) {
     console.error('Create sponsored ad error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -237,10 +314,17 @@ router.post('/sponsored-ads', authenticate, authorize('system_manager', 'marketi
 // @access  Private (System Manager, Marketing Manager)
 router.get('/sponsored-ads', authenticate, authorize('system_manager', 'marketing_manager'), async (req, res) => {
   try {
-    const [ads] = await pool.execute(
-      'SELECT * FROM sponsored_ads ORDER BY created_at DESC'
-    );
-    res.json({ sponsored_ads: ads });
+    const { data: ads, error } = await supabase
+      .from('sponsored_ads')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Get sponsored ads error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.json({ sponsored_ads: ads || [] });
   } catch (error) {
     console.error('Get sponsored ads error:', error);
     res.status(500).json({ message: 'Server error' });

@@ -18,7 +18,7 @@ A comprehensive digital platform for advertising fuel stations in the Kingdom of
 
 ### Backend
 - Node.js with Express
-- MySQL Database
+- Supabase (PostgreSQL) Database
 - JWT Authentication
 - Stripe Payment Integration
 - Email Service (Nodemailer)
@@ -56,8 +56,8 @@ Mahattati/
 ## Installation
 
 ### Prerequisites
-- Node.js (v14 or higher)
-- MySQL (v8.0 or higher)
+- Node.js (v20 or higher) - Required for Supabase JavaScript client
+- Supabase account (free tier available)
 - npm or yarn
 
 ### Backend Setup
@@ -78,17 +78,17 @@ cp .env.example .env
 ```
 
 4. Update the `.env` file with your configuration:
-   - Database credentials
+   - Supabase URL and anon key
    - JWT secret
    - Stripe keys
    - Email service credentials
    - Google Maps API key
    - Firebase credentials
 
-5. Create the database:
-```bash
-mysql -u root -p < config/database.sql
-```
+5. Set up Supabase database:
+   - Create a Supabase project at https://supabase.com
+   - Run the SQL schema from `config/database.sql` in the Supabase SQL editor
+   - Get your Supabase URL and anon key from project settings
 
 6. Start the server:
 ```bash
@@ -214,16 +214,21 @@ See individual route files for complete API documentation.
 ### Backend (.env)
 ```
 PORT=5000
-DB_HOST=localhost
-DB_USER=root
-DB_PASSWORD=your_password
-DB_NAME=mahattati
+NODE_ENV=development
+CLIENT_URL=http://localhost:3000
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your_supabase_anon_key
 JWT_SECRET=your_secret_key
+JWT_EXPIRES_IN=7d
 STRIPE_SECRET_KEY=your_stripe_secret
+STRIPE_PUBLISHABLE_KEY=your_stripe_publishable_key
 GOOGLE_MAPS_API_KEY=your_google_maps_key
 EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
 EMAIL_USER=your_email@gmail.com
 EMAIL_PASS=your_email_password
+UPLOAD_DIR=./uploads
+MAX_FILE_SIZE=5242880
 ```
 
 ### Frontend (.env)
@@ -236,10 +241,11 @@ REACT_APP_STRIPE_PUBLISHABLE_KEY=your_stripe_publishable_key
 
 - JWT-based authentication
 - Password hashing with bcrypt
-- SQL injection prevention with parameterized queries
+- SQL injection prevention with Supabase query builder (parameterized queries)
 - XSS protection with helmet
 - Rate limiting on API endpoints
 - HTTPS enforcement in production
+- Supabase Row Level Security (RLS) for database access control
 
 ## Compliance
 

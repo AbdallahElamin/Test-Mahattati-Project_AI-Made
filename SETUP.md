@@ -20,21 +20,19 @@ cd ../client
 npm install
 ```
 
-### 2. Database Setup
+### 2. Supabase Database Setup
 
-1. Make sure MySQL is running
-2. Create the database:
-```bash
-mysql -u root -p < server/config/database.sql
-```
-
-Or manually:
-```sql
-mysql -u root -p
-CREATE DATABASE mahattati;
-USE mahattati;
-SOURCE server/config/database.sql;
-```
+1. Create a Supabase account at https://supabase.com (free tier available)
+2. Create a new project
+3. Go to the SQL Editor in your Supabase dashboard
+4. Run the SQL schema from `server/config/database.sql`:
+   - Copy the contents of `server/config/database.sql`
+   - Paste into the Supabase SQL Editor
+   - Click "Run" to execute the schema
+5. Get your Supabase credentials:
+   - Go to Project Settings → API
+   - Copy your Project URL (SUPABASE_URL)
+   - Copy your anon/public key (SUPABASE_ANON_KEY)
 
 ### 3. Configure Environment Variables
 
@@ -44,11 +42,10 @@ PORT=5000
 NODE_ENV=development
 CLIENT_URL=http://localhost:3000
 
-DB_HOST=localhost
-DB_USER=root
-DB_PASSWORD=your_password
-DB_NAME=mahattati
-DB_PORT=3306
+# Supabase Database Configuration (PostgreSQL)
+# Get credentials from: https://supabase.com/dashboard/project/YOUR_PROJECT_ID/settings/api
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=your_supabase_anon_key
 
 JWT_SECRET=your_super_secret_jwt_key_change_in_production
 JWT_EXPIRES_IN=7d
@@ -120,18 +117,21 @@ npm start
 
 To create admin users, you can either:
 
-1. **Directly in Database:**
-```sql
-INSERT INTO users (name, email, password, role, email_verified) 
-VALUES ('Admin', 'admin@mahattati.com', '$2a$10$hashed_password', 'system_manager', TRUE);
-```
+1. **Directly in Supabase:**
+   - Go to Supabase Dashboard → Table Editor → users
+   - Click "Insert" and add a new user with:
+     - name: 'Admin'
+     - email: 'admin@mahattati.com'
+     - password: (hashed password using bcrypt)
+     - role: 'system_manager'
+     - email_verified: true
 
 2. **Via Registration then Update Role:**
-- Register normally through the UI
-- Update role in database:
-```sql
-UPDATE users SET role = 'system_manager' WHERE email = 'admin@mahattati.com';
-```
+   - Register normally through the UI
+   - Update role in Supabase:
+     - Go to Supabase Dashboard → Table Editor → users
+     - Find the user by email
+     - Update the role to 'system_manager'
 
 ## Testing Payment Integration
 
@@ -175,9 +175,10 @@ Update EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS accordingly
 ## Troubleshooting
 
 ### Database Connection Error
-- Verify MySQL is running
-- Check database credentials in .env
-- Ensure database exists
+- Verify Supabase project is active
+- Check SUPABASE_URL and SUPABASE_ANON_KEY in .env
+- Ensure database tables are created (run database.sql in Supabase SQL Editor)
+- Check Supabase project status in dashboard
 
 ### Port Already in Use
 - Change PORT in server/.env
@@ -203,9 +204,10 @@ Update EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS accordingly
 1. Set NODE_ENV=production
 2. Use strong JWT_SECRET
 3. Configure proper CORS origins
-4. Use production database
+4. Use production Supabase project (or upgrade to paid tier if needed)
 5. Set up SSL/HTTPS
-6. Configure proper file storage (S3, etc.)
+6. Configure proper file storage (S3, Supabase Storage, etc.)
+7. Enable Row Level Security (RLS) policies in Supabase
 
 ### Frontend
 1. Build: `npm run build`
@@ -217,15 +219,17 @@ Update EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASS accordingly
 ## Security Checklist
 
 - [ ] Change default JWT_SECRET
-- [ ] Use strong database passwords
+- [ ] Use strong Supabase anon key (rotate if compromised)
 - [ ] Enable HTTPS in production
 - [ ] Configure CORS properly
 - [ ] Set up rate limiting
-- [ ] Enable SQL injection protection
+- [ ] Enable Row Level Security (RLS) in Supabase
 - [ ] Configure file upload limits
 - [ ] Set up proper error logging
 - [ ] Enable email verification
 - [ ] Configure password reset properly
+- [ ] Review Supabase RLS policies for all tables
+- [ ] Enable Supabase database backups
 
 
 

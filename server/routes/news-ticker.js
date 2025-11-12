@@ -1,5 +1,5 @@
 const express = require('express');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 
 const router = express.Router();
 
@@ -8,10 +8,19 @@ const router = express.Router();
 // @access  Public
 router.get('/', async (req, res) => {
   try {
-    const [news] = await pool.execute(
-      'SELECT * FROM news_ticker WHERE is_active = TRUE ORDER BY priority DESC, created_at DESC'
-    );
-    res.json({ news });
+    const { data: news, error } = await supabase
+      .from('news_ticker')
+      .select('*')
+      .eq('is_active', true)
+      .order('priority', { ascending: false })
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Get news ticker error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.json({ news: news || [] });
   } catch (error) {
     console.error('Get news ticker error:', error);
     res.status(500).json({ message: 'Server error' });

@@ -1,5 +1,5 @@
 const express = require('express');
-const pool = require('../config/database');
+const supabase = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
@@ -11,17 +11,25 @@ router.get('/', authenticate, async (req, res) => {
   try {
     const { unread_only } = req.query;
 
-    let query = 'SELECT * FROM notifications WHERE user_id = ?';
-    const params = [req.user.id];
+    let query = supabase
+      .from('notifications')
+      .select('*')
+      .eq('user_id', req.user.id);
 
     if (unread_only === 'true') {
-      query += ' AND is_read = FALSE';
+      query = query.eq('is_read', false);
     }
 
-    query += ' ORDER BY created_at DESC LIMIT 50';
+    query = query.order('created_at', { ascending: false }).limit(50);
 
-    const [notifications] = await pool.execute(query, params);
-    res.json({ notifications });
+    const { data: notifications, error } = await query;
+
+    if (error) {
+      console.error('Get notifications error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
+
+    res.json({ notifications: notifications || [] });
   } catch (error) {
     console.error('Get notifications error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -35,10 +43,16 @@ router.put('/:id/read', authenticate, async (req, res) => {
   try {
     const { id } = req.params;
 
-    await pool.execute(
-      'UPDATE notifications SET is_read = TRUE WHERE id = ? AND user_id = ?',
-      [id, req.user.id]
-    );
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('id', id)
+      .eq('user_id', req.user.id);
+
+    if (error) {
+      console.error('Mark notification read error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
 
     res.json({ message: 'Notification marked as read' });
   } catch (error) {
@@ -52,10 +66,16 @@ router.put('/:id/read', authenticate, async (req, res) => {
 // @access  Private
 router.put('/read-all', authenticate, async (req, res) => {
   try {
-    await pool.execute(
-      'UPDATE notifications SET is_read = TRUE WHERE user_id = ? AND is_read = FALSE',
-      [req.user.id]
-    );
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('user_id', req.user.id)
+      .eq('is_read', false);
+
+    if (error) {
+      console.error('Mark all notifications read error:', error);
+      return res.status(500).json({ message: 'Server error' });
+    }
 
     res.json({ message: 'All notifications marked as read' });
   } catch (error) {
