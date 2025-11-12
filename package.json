@@ -9,13 +9,14 @@
     "client": "cd client && npm start",
     "install-all": "npm install && cd server && npm install && cd ../client && npm install"
   },
-  "keywords": ["fuel-stations", "advertising", "saudi-arabia"],
+  "keywords": [
+    "fuel-stations",
+    "advertising",
+    "saudi-arabia"
+  ],
   "author": "",
   "license": "ISC",
   "devDependencies": {
     "concurrently": "^8.2.2"
   }
 }
-
-
-
